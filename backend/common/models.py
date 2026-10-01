@@ -170,6 +170,59 @@ class Shard:
 
 
 # ---------------------------------------------------------------------------
+# Job template (a named, reusable job configuration)
+# ---------------------------------------------------------------------------
+@dataclass
+class JobTemplate:
+    template_id: str
+    name: str
+    mapper: str
+    reducer: str
+    num_map_tasks: int
+    num_reduce_tasks: int
+    input_rows: int
+    params: dict = field(default_factory=dict)
+    description: str = ""
+    created_ms: int = 0
+    updated_ms: int = 0
+    source_template_id: str = ""        # set when created via "duplicate"
+    version: int = 0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "JobTemplate":
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+    def job_payload(self, overrides: Optional[dict] = None) -> dict:
+        """Render this template as a job-submission payload.
+
+        A deep-ish copy is returned so a caller can freely mutate the result
+        (e.g. tweak params after applying the template) without ever touching
+        the stored template.
+        """
+        payload = {
+            "name": self.name,
+            "mapper": self.mapper,
+            "reducer": self.reducer,
+            "num_map_tasks": self.num_map_tasks,
+            "num_reduce_tasks": self.num_reduce_tasks,
+            "input_rows": self.input_rows,
+            "params": dict(self.params),
+        }
+        for key, value in (overrides or {}).items():
+            if key == "params" and isinstance(value, dict):
+                merged = dict(payload["params"])
+                merged.update(value)
+                payload["params"] = merged
+            else:
+                payload[key] = value
+        return payload
+
+
+# ---------------------------------------------------------------------------
 # Fault / retry event
 # ---------------------------------------------------------------------------
 @dataclass
@@ -235,6 +288,26 @@ def new_job(name: str, mapper: str, reducer: str, num_map_tasks: int,
         created_ms=now_ms(),
         params=params or {},
         stage_progress={s: {"done": 0, "total": 0, "pct": 0.0} for s in C.STAGES},
+    )
+
+
+def new_template(name: str, mapper: str, reducer: str, num_map_tasks: int,
+                 num_reduce_tasks: int, input_rows: int, params: Optional[dict] = None,
+                 description: str = "", source_template_id: str = "") -> JobTemplate:
+    ts = now_ms()
+    return JobTemplate(
+        template_id=new_id("tpl"),
+        name=name,
+        mapper=mapper,
+        reducer=reducer,
+        num_map_tasks=num_map_tasks,
+        num_reduce_tasks=num_reduce_tasks,
+        input_rows=input_rows,
+        params=params or {},
+        description=description,
+        created_ms=ts,
+        updated_ms=ts,
+        source_template_id=source_template_id,
     )
 
 

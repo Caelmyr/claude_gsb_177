@@ -19,14 +19,16 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 from backend.common import constants as C
 from backend.common.config import ClusterConfig, ConfigManager, JobDefaults
 from backend.common.logbus import LogBus
-from backend.common.models import Job
+from backend.common.models import Job  # noqa: F401  (typing/readability)
 from backend.common.storage import Storage, list_files, read_json
 from backend.master.fault_tolerance import FaultTolerance
-from backend.master.job_manager import JobManager
+from backend.master.job_manager import JobManager, JobValidationError
 from backend.master.metrics import Metrics
 from backend.master.registry import WorkerRegistry
 from backend.master.scheduler import Scheduler
 from backend.master.shuffle import ShuffleCoordinator
+from backend.master.templates import TemplateError, TemplateManager, TemplateValidationError
+from backend.master.validation import validate_payload
 from backend.tasks.registry import list_all as list_functions
 from backend.tasks.samples import list_sample_jobs
 
@@ -46,6 +48,7 @@ class Master:
 
         self.logbus = LogBus(self.storage)
         self.job_manager = JobManager(self.storage, self.config, self.logbus)
+        self.template_manager = TemplateManager(self.storage)
         self.registry = WorkerRegistry(self.storage, self.config)
         self.metrics = Metrics(self.storage)
         self.shuffle = ShuffleCoordinator(self.storage, self.job_manager, self.registry, self.logbus)
@@ -94,6 +97,18 @@ class Master:
         app.add_url_rule("/api/cluster/metrics", "cluster_metrics", self._cluster_metrics, methods=["GET"])
         app.add_url_rule("/api/config", "config", self._config, methods=["GET", "PUT"])
         app.add_url_rule("/api/config/defaults", "config_defaults", self._config_defaults, methods=["GET", "PUT"])
+
+        # --- job templates --------------------------------------------------
+        app.add_url_rule("/api/templates", "templates", self._templates, methods=["GET", "POST"])
+        app.add_url_rule("/api/templates/<template_id>", "template_detail",
+                         self._template_detail, methods=["GET", "PUT", "DELETE"])
+        app.add_url_rule("/api/templates/<template_id>/duplicate", "template_duplicate",
+                         self._template_duplicate, methods=["POST"])
+        app.add_url_rule("/api/templates/<template_id>/apply", "template_apply",
+                         self._template_apply, methods=["POST"])
+        app.add_url_rule("/api/templates/<template_id>/submit", "template_submit",
+                         self._template_submit, methods=["POST"])
+        app.add_url_rule("/api/validate-job", "validate_job", self._validate_job, methods=["POST"])
 
         # --- worker-facing --------------------------------------------------
         app.add_url_rule("/api/workers/register", "worker_register", self._worker_register, methods=["POST"])
@@ -178,9 +193,19 @@ class Master:
             body["_defaults"] = self.config_manager.load_defaults().to_dict()
             try:
                 job = self.job_manager.submit(body)
+            except JobValidationError as exc:
+                return jsonify({"error": str(exc), "validation": exc.result.to_dict()}), 400
             except (ValueError, KeyError) as exc:
                 return jsonify({"error": str(exc)}), 400
-            return jsonify(self.job_manager.job_summary(job)), 201
+            # Environment warnings (capacity, input data) never block submit;
+            # echo them so the UI can show what it applied against.
+            warnings = validate_payload(
+                {k: v for k, v in body.items() if k != "_defaults"},
+                registry=self.registry, config=self.config,
+            ).warnings
+            resp = self.job_manager.job_summary(job)
+            resp["warnings"] = [i.to_dict() for i in warnings]
+            return jsonify(resp), 201
         return jsonify({"jobs": [self.job_manager.job_summary(j) for j in self.job_manager.list_jobs()]})
 
     def _job_detail(self, job_id: str):
@@ -337,6 +362,98 @@ class Master:
             defaults = self.config_manager.save_defaults(JobDefaults.from_dict(body))
             return jsonify(defaults.to_dict())
         return jsonify(self.config_manager.load_defaults().to_dict())
+
+    # ------------------------------------------------------------------
+    # Job templates
+    # ------------------------------------------------------------------
+    def _templates(self):
+        if request.method == "POST":
+            body = request.get_json(silent=True) or {}
+            try:
+                tpl = self.template_manager.create(body)
+            except TemplateValidationError as exc:
+                return jsonify({"error": str(exc), "validation": exc.result.to_dict()}), 400
+            except TemplateError as exc:
+                return jsonify({"error": str(exc)}), 409
+            return jsonify(self.template_manager.summary(tpl)), 201
+        return jsonify({"templates": self.template_manager.list_views()})
+
+    def _template_detail(self, template_id: str):
+        tpl = self.template_manager.get(template_id)
+        if tpl is None:
+            return jsonify({"error": f"unknown template {template_id}"}), 404
+
+        if request.method == "DELETE":
+            self.template_manager.delete(template_id)
+            return jsonify({"ok": True, "template_id": template_id})
+
+        if request.method == "PUT":
+            body = request.get_json(silent=True) or {}
+            try:
+                tpl = self.template_manager.update(template_id, body)
+            except TemplateValidationError as exc:
+                return jsonify({"error": str(exc), "validation": exc.result.to_dict()}), 400
+            except TemplateError as exc:
+                return jsonify({"error": str(exc)}), 404
+        return jsonify(self.template_manager.summary(tpl))
+
+    def _template_duplicate(self, template_id: str):
+        if self.template_manager.get(template_id) is None:
+            return jsonify({"error": f"unknown template {template_id}"}), 404
+        body = request.get_json(silent=True) or {}
+        try:
+            tpl = self.template_manager.duplicate(template_id, body)
+        except TemplateValidationError as exc:
+            return jsonify({"error": str(exc), "validation": exc.result.to_dict()}), 400
+        return jsonify(self.template_manager.summary(tpl)), 201
+
+    def _template_apply(self, template_id: str):
+        """Render a template into a payload + field-level validation report.
+
+        The template document is never modified; caller tweaks stay in the
+        returned payload only.
+        """
+        overrides = request.get_json(silent=True) or {}
+        try:
+            result = self.template_manager.apply(
+                template_id, overrides=overrides,
+                registry=self.registry, config=self.config,
+            )
+        except TemplateError as exc:
+            return jsonify({"error": str(exc)}), 404
+        result["template"] = self.template_manager.summary(
+            self.template_manager.get(template_id))
+        return jsonify(result)
+
+    def _template_submit(self, template_id: str):
+        """One-click apply + submit, with optional per-field overrides."""
+        if self.template_manager.get(template_id) is None:
+            return jsonify({"error": f"unknown template {template_id}"}), 404
+        body = request.get_json(silent=True) or {}
+        overrides = body.get("overrides") if isinstance(body.get("overrides"), dict) else body
+        result = self.template_manager.apply(
+            template_id, overrides=overrides,
+            registry=self.registry, config=self.config,
+        )
+        if not result["validation"]["ok"]:
+            return jsonify({"error": "template payload is invalid",
+                            "validation": result["validation"]}), 400
+        payload = result["payload"]
+        payload["_defaults"] = self.config_manager.load_defaults().to_dict()
+        try:
+            job = self.job_manager.submit(payload)
+        except JobValidationError as exc:
+            return jsonify({"error": str(exc), "validation": exc.result.to_dict()}), 400
+        resp = self.job_manager.job_summary(job)
+        resp["warnings"] = result["validation"]["warnings"]
+        return jsonify(resp), 201
+
+    def _validate_job(self):
+        """Validate an arbitrary job payload without persisting anything."""
+        body = request.get_json(silent=True) or {}
+        body.pop("_defaults", None)
+        result = validate_payload(body, registry=self.registry, config=self.config)
+        return jsonify(result.to_dict())
 
     # ------------------------------------------------------------------
     # Worker-facing routes

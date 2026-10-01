@@ -21,8 +21,16 @@ from backend.common.logbus import LogBus
 from backend.common.models import Job, Task, new_job
 from backend.common.storage import Storage, list_files, list_subdirs, read_json
 from backend.master.shard_planner import ShardPlanner
-from backend.tasks.registry import has_mapper, has_reducer
+from backend.master.validation import validate_structure
 from backend.tasks.samples import input_kind_for
+
+
+class JobValidationError(ValueError):
+    """Structured, field-tagged validation failure for job submissions."""
+
+    def __init__(self, result) -> None:
+        super().__init__("; ".join(i.message for i in result.errors) or "invalid job")
+        self.result = result
 
 
 class JobManager:
@@ -70,19 +78,30 @@ class JobManager:
     # Submission
     # ------------------------------------------------------------------
     def submit(self, payload: dict) -> Job:
-        name = str(payload.get("name") or "untitled").strip() or "untitled"
-        mapper = str(payload.get("mapper") or "")
-        reducer = str(payload.get("reducer") or "")
-        if not has_mapper(mapper):
-            raise ValueError(f"unknown mapper: {mapper!r}")
-        if not has_reducer(reducer):
-            raise ValueError(f"unknown reducer: {reducer!r}")
-
         defaults = payload.get("_defaults") or {}
-        num_map = int(payload.get("num_map_tasks", defaults.get("num_map_tasks", 8)))
-        num_reduce = int(payload.get("num_reduce_tasks", defaults.get("num_reduce_tasks", 4)))
-        input_rows = int(payload.get("input_rows", defaults.get("input_rows", 12000)))
-        params = dict(payload.get("params") or {})
+
+        # Fill defaults first so validation sees the effective configuration
+        # (the UI may leave numeric fields blank on purpose).
+        candidate = {
+            "name": str(payload.get("name") or "untitled").strip() or "untitled",
+            "mapper": str(payload.get("mapper") or ""),
+            "reducer": str(payload.get("reducer") or ""),
+            "num_map_tasks": payload.get("num_map_tasks", defaults.get("num_map_tasks", 8)),
+            "num_reduce_tasks": payload.get("num_reduce_tasks", defaults.get("num_reduce_tasks", 4)),
+            "input_rows": payload.get("input_rows", defaults.get("input_rows", 12000)),
+            "params": dict(payload.get("params") or {}),
+        }
+        result = validate_structure(candidate)
+        if not result.ok:
+            raise JobValidationError(result)
+
+        name = candidate["name"]
+        mapper = candidate["mapper"]
+        reducer = candidate["reducer"]
+        num_map = int(candidate["num_map_tasks"])
+        num_reduce = int(candidate["num_reduce_tasks"])
+        input_rows = int(candidate["input_rows"])
+        params = candidate["params"]
         params["input_kind"] = input_kind_for(mapper)
 
         job = new_job(name, mapper, reducer, num_map, num_reduce, input_rows, params)

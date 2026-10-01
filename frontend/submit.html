@@ -12,40 +12,70 @@
     <h1 class="page-title">作业提交与配置 <span>Job Submission &amp; Configuration</span></h1>
     <p class="page-desc">配置并提交一个 MapReduce 作业；支持内置示例与故障注入。Submit a MapReduce job; built-in presets and fault injection are supported.</p>
 
-    <div class="grid cols-2">
+    <div class="card">
+      <h2>作业模板 <span class="sub">Job templates</span></h2>
+      <p class="hint" style="margin:0 0 4px">把常用参数保存为模板，套用时一键填充；套用后修改不会影响模板本身。
+        Save common configurations as named templates; applying fills the form and edits never touch the saved template.</p>
+      <div class="tpl-bar">
+        <select id="template-select">
+          <option value="">选择模板 Select a template…</option>
+        </select>
+        <button class="btn small" type="button" id="tpl-apply">套用 Apply</button>
+        <button class="btn small" type="button" id="tpl-save">存为模板 Save as…</button>
+        <button class="btn small" type="button" id="tpl-copy">另存副本 Duplicate</button>
+        <button class="btn small" type="button" id="tpl-edit">保存修改 Update</button>
+        <button class="btn small danger" type="button" id="tpl-delete">删除 Delete</button>
+      </div>
+      <div class="tpl-meta" id="tpl-meta"></div>
+    </div>
+
+    <div class="grid cols-2 mt">
       <div class="card">
         <h2>作业参数 <span class="sub">Job parameters</span></h2>
-        <form id="form">
+        <form id="form" autocomplete="off">
           <label>示例作业 Preset</label>
           <select id="preset"></select>
 
           <label>作业名称 Job name</label>
           <input id="name" type="text" value="WordCount 词频统计" required>
+          <div class="field-error" data-field="name"></div>
 
           <div class="row">
             <div>
               <label>Map 函数 Mapper</label>
               <select id="mapper"></select>
+              <div class="field-error" data-field="mapper"></div>
             </div>
             <div>
               <label>Reduce 函数 Reducer</label>
               <select id="reducer"></select>
+              <div class="field-error" data-field="reducer"></div>
             </div>
           </div>
 
           <div class="row">
             <div>
               <label>Map 任务数 Map tasks</label>
-              <input id="num_map_tasks" type="number" min="1" max="200" value="8">
+              <input id="num_map_tasks" type="number" min="1" max="1000" value="8">
+              <div class="field-error" data-field="num_map_tasks"></div>
+              <div class="field-warn" data-field="num_map_tasks"></div>
             </div>
             <div>
               <label>Reduce 任务数 Reduce tasks</label>
-              <input id="num_reduce_tasks" type="number" min="1" max="100" value="4">
+              <input id="num_reduce_tasks" type="number" min="1" max="500" value="4">
+              <div class="field-error" data-field="num_reduce_tasks"></div>
             </div>
             <div>
               <label>输入行数 Input rows</label>
-              <input id="input_rows" type="number" min="10" max="1000000" value="12000">
+              <input id="input_rows" type="number" min="10" max="10000000" value="12000">
+              <div class="field-error" data-field="input_rows"></div>
             </div>
+          </div>
+
+          <div id="pattern-row" style="display:none">
+            <label>检索关键词 Grep pattern</label>
+            <input id="pattern" type="text" value="map" placeholder="grep 必填 required">
+            <div class="field-error" data-field="params.pattern"></div>
           </div>
 
           <fieldset>
@@ -55,6 +85,9 @@
               故障注入 Fault injection（首轮任务模拟失败并自动重试 retry）
             </label>
           </fieldset>
+
+          <div class="validation-banner error" id="error-banner"></div>
+          <div class="validation-banner warn" id="warn-banner"></div>
 
           <div class="mt flex">
             <button class="btn primary" type="submit">提交作业 Submit Job</button>
