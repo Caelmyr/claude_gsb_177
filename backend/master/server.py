@@ -27,6 +27,10 @@ from backend.master.metrics import Metrics
 from backend.master.registry import WorkerRegistry
 from backend.master.scheduler import Scheduler
 from backend.master.shuffle import ShuffleCoordinator
+from backend.master import validation as V
+from backend.master.templates import (
+    DuplicateTemplateName, TemplateManager, TemplateNotFound,
+)
 from backend.tasks.registry import list_all as list_functions
 from backend.tasks.samples import list_sample_jobs
 
@@ -47,6 +51,8 @@ class Master:
         self.logbus = LogBus(self.storage)
         self.job_manager = JobManager(self.storage, self.config, self.logbus)
         self.registry = WorkerRegistry(self.storage, self.config)
+        self.templates = TemplateManager(self.storage)
+        self.templates.ensure_seeded()
         self.metrics = Metrics(self.storage)
         self.shuffle = ShuffleCoordinator(self.storage, self.job_manager, self.registry, self.logbus)
         self.fault_tolerance = FaultTolerance(self.storage, self.job_manager, self.config, self.logbus)
@@ -78,6 +84,14 @@ class Master:
         app.add_url_rule("/api/functions", "functions", self._functions, methods=["GET"])
         app.add_url_rule("/api/samples", "samples", self._samples, methods=["GET"])
         app.add_url_rule("/api/jobs", "jobs", self._jobs, methods=["GET", "POST"])
+        app.add_url_rule("/api/jobs/validate", "jobs_validate", self._jobs_validate, methods=["POST"])
+        app.add_url_rule("/api/templates", "templates", self._templates, methods=["GET", "POST"])
+        app.add_url_rule("/api/templates/<template_id>", "template_detail",
+                         self._template_detail, methods=["GET", "PUT", "DELETE"])
+        app.add_url_rule("/api/templates/<template_id>/copy", "template_copy",
+                         self._template_copy, methods=["POST"])
+        app.add_url_rule("/api/templates/<template_id>/apply", "template_apply",
+                         self._template_apply, methods=["POST", "GET"])
         app.add_url_rule("/api/jobs/<job_id>", "job_detail", self._job_detail, methods=["GET"])
         app.add_url_rule("/api/jobs/<job_id>/cancel", "job_cancel", self._job_cancel, methods=["POST"])
         app.add_url_rule("/api/jobs/<job_id>/tasks", "job_tasks", self._job_tasks, methods=["GET"])
@@ -175,13 +189,105 @@ class Master:
     def _jobs(self):
         if request.method == "POST":
             body = request.get_json(silent=True) or {}
-            body["_defaults"] = self.config_manager.load_defaults().to_dict()
+            defaults = self.config_manager.load_defaults().to_dict()
+            spec, issues = V.validate_payload(
+                body, defaults=defaults, registry=self.registry, config=self.config,
+            )
+            errors = [i for i in issues if i.severity == V.ERROR]
+            if errors:
+                return jsonify({
+                    "error": errors[0].message,
+                    "errors": V.issues_to_dicts(errors),
+                    "warnings": V.issues_to_dicts([i for i in issues if i.severity == V.WARNING]),
+                }), 400
             try:
-                job = self.job_manager.submit(body)
+                job = self.job_manager.submit(spec)
             except (ValueError, KeyError) as exc:
                 return jsonify({"error": str(exc)}), 400
             return jsonify(self.job_manager.job_summary(job)), 201
         return jsonify({"jobs": [self.job_manager.job_summary(j) for j in self.job_manager.list_jobs()]})
+
+    def _jobs_validate(self):
+        """Dry-run validation: return the normalised spec plus field issues."""
+        body = request.get_json(silent=True) or {}
+        defaults = self.config_manager.load_defaults().to_dict()
+        spec, issues = V.validate_payload(
+            body, defaults=defaults, registry=self.registry, config=self.config,
+        )
+        return jsonify({
+            "valid": not V.has_errors(issues),
+            "spec": spec,
+            "errors": V.issues_to_dicts([i for i in issues if i.severity == V.ERROR]),
+            "warnings": V.issues_to_dicts([i for i in issues if i.severity == V.WARNING]),
+        })
+
+    # ------------------------------------------------------------------
+    # Template routes
+    # ------------------------------------------------------------------
+    def _templates(self):
+        if request.method == "POST":
+            body = request.get_json(silent=True) or {}
+            try:
+                tpl = self.templates.create(body)
+            except DuplicateTemplateName as exc:
+                return jsonify({"error": str(exc)}), 409
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+            return jsonify(TemplateManager.to_dict(tpl)), 201
+        return jsonify({"templates": [TemplateManager.to_dict(t) for t in self.templates.list_all()]})
+
+    def _template_detail(self, template_id: str):
+        if request.method == "DELETE":
+            try:
+                self.templates.delete(template_id)
+            except TemplateNotFound as exc:
+                return jsonify({"error": str(exc)}), 404
+            return jsonify({"ok": True, "template_id": template_id})
+
+        if request.method == "PUT":
+            body = request.get_json(silent=True) or {}
+            try:
+                tpl = self.templates.update(template_id, body)
+            except TemplateNotFound as exc:
+                return jsonify({"error": str(exc)}), 404
+            except DuplicateTemplateName as exc:
+                return jsonify({"error": str(exc)}), 409
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+            return jsonify(TemplateManager.to_dict(tpl))
+
+        try:
+            tpl = self.templates.require(template_id)
+        except TemplateNotFound as exc:
+            return jsonify({"error": str(exc)}), 404
+        return jsonify(TemplateManager.to_dict(tpl))
+
+    def _template_copy(self, template_id: str):
+        body = request.get_json(silent=True) or {}
+        try:
+            tpl = self.templates.duplicate(template_id, body)
+        except TemplateNotFound as exc:
+            return jsonify({"error": str(exc)}), 404
+        except DuplicateTemplateName as exc:
+            return jsonify({"error": str(exc)}), 409
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify(TemplateManager.to_dict(tpl)), 201
+
+    def _template_apply(self, template_id: str):
+        try:
+            spec = self.templates.apply(template_id)
+        except TemplateNotFound as exc:
+            return jsonify({"error": str(exc)}), 404
+        # Validate the *snapshot* against the live cluster; the stored
+        # template is never touched and warnings never block submission.
+        _, issues = V.validate_payload(spec, registry=self.registry, config=self.config)
+        return jsonify({
+            "template_id": template_id,
+            "spec": spec,
+            "errors": V.issues_to_dicts([i for i in issues if i.severity == V.ERROR]),
+            "warnings": V.issues_to_dicts([i for i in issues if i.severity == V.WARNING]),
+        })
 
     def _job_detail(self, job_id: str):
         job, err, code = self._get_job(job_id)

@@ -10,8 +10,9 @@ const API = (() => {
     const ct = resp.headers.get('content-type') || '';
     const data = ct.includes('application/json') ? await resp.json() : await resp.text();
     if (!resp.ok) {
-      const msg = (data && typeof data === 'object' && data.error) ? data.error : ('HTTP ' + resp.status);
-      throw new Error(msg);
+      const err = new Error((data && typeof data === 'object' && data.error) ? data.error : ('HTTP ' + resp.status));
+      err.payload = data;
+      throw err;
     }
     return data;
   }
@@ -19,5 +20,6 @@ const API = (() => {
     get: (p) => request('GET', p),
     post: (p, b) => request('POST', p, b),
     put: (p, b) => request('PUT', p, b),
+    del: (p) => request('DELETE', p),
   };
 })();

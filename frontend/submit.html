@@ -10,54 +10,87 @@
   <header id="app-nav"></header>
   <main class="page">
     <h1 class="page-title">作业提交与配置 <span>Job Submission &amp; Configuration</span></h1>
-    <p class="page-desc">配置并提交一个 MapReduce 作业；支持内置示例与故障注入。Submit a MapReduce job; built-in presets and fault injection are supported.</p>
+    <p class="page-desc">把常用配置保存成命名模板，一键套用、复制、编辑或删除；提交前自动做字段级校验。
+      Save common configs as named templates: apply, copy, edit, delete, with field-level validation.</p>
 
-    <div class="grid cols-2">
+    <div class="card">
+      <h2>作业模板 <span class="sub">Job templates</span></h2>
+      <div class="row">
+        <div style="flex:2">
+          <label>选择模板 Template</label>
+          <select id="tpl-select">
+            <option value="">— 不使用模板 None —</option>
+          </select>
+        </div>
+        <div class="tpl-actions">
+          <button class="btn small" type="button" id="tpl-apply">套用 Apply</button>
+          <button class="btn small" type="button" id="tpl-save-new">存为新模板 Save as new</button>
+          <button class="btn small" type="button" id="tpl-save">保存修改 Save</button>
+          <button class="btn small" type="button" id="tpl-copy">复制为新模板 Copy</button>
+          <button class="btn small danger" type="button" id="tpl-delete">删除 Delete</button>
+        </div>
+      </div>
+      <div class="hint" id="tpl-meta"></div>
+    </div>
+
+    <div class="grid cols-2 mt">
       <div class="card">
         <h2>作业参数 <span class="sub">Job parameters</span></h2>
-        <form id="form">
-          <label>示例作业 Preset</label>
+        <form id="form" novalidate>
+          <label>示例作业 Preset（内置样例，仅填充表单）</label>
           <select id="preset"></select>
 
           <label>作业名称 Job name</label>
           <input id="name" type="text" value="WordCount 词频统计" required>
+          <div class="field-error" id="err-name"></div>
 
           <div class="row">
             <div>
               <label>Map 函数 Mapper</label>
               <select id="mapper"></select>
+              <div class="field-error" id="err-mapper"></div>
             </div>
             <div>
               <label>Reduce 函数 Reducer</label>
               <select id="reducer"></select>
+              <div class="field-error" id="err-reducer"></div>
             </div>
           </div>
 
           <div class="row">
             <div>
               <label>Map 任务数 Map tasks</label>
-              <input id="num_map_tasks" type="number" min="1" max="200" value="8">
+              <input id="num_map_tasks" type="number" min="1" max="1000" value="8">
+              <div class="field-error" id="err-num_map_tasks"></div>
             </div>
             <div>
               <label>Reduce 任务数 Reduce tasks</label>
-              <input id="num_reduce_tasks" type="number" min="1" max="100" value="4">
+              <input id="num_reduce_tasks" type="number" min="1" max="500" value="4">
+              <div class="field-error" id="err-num_reduce_tasks"></div>
             </div>
             <div>
               <label>输入行数 Input rows</label>
-              <input id="input_rows" type="number" min="10" max="1000000" value="12000">
+              <input id="input_rows" type="number" min="10" max="10000000" value="12000">
+              <div class="field-error" id="err-input_rows"></div>
             </div>
           </div>
 
           <fieldset>
             <legend>高级 Advanced</legend>
-            <label style="display:flex;align-items:center;gap:8px;margin:0">
+            <label>Grep 关键词 Pattern（grep_mapper 必填 required for grep）</label>
+            <input id="param_pattern" type="text" value="" placeholder="例如 / e.g. map">
+            <div class="field-error" id="err-params.pattern"></div>
+            <label style="display:flex;align-items:center;gap:8px;margin-top:8px">
               <input id="simulate_failure" type="checkbox" style="width:auto">
               故障注入 Fault injection（首轮任务模拟失败并自动重试 retry）
             </label>
           </fieldset>
 
+          <div id="issues"></div>
+
           <div class="mt flex">
-            <button class="btn primary" type="submit">提交作业 Submit Job</button>
+            <button class="btn primary" type="submit">校验并提交 Validate &amp; Submit</button>
+            <button class="btn" type="button" id="btn-validate">仅校验 Validate only</button>
             <span class="hint">提交后跳转至监控页 After submit, open the Monitor page.</span>
           </div>
         </form>

@@ -170,6 +170,51 @@ class Shard:
 
 
 # ---------------------------------------------------------------------------
+# Job template (a named, reusable job configuration)
+# ---------------------------------------------------------------------------
+@dataclass
+class JobTemplate:
+    template_id: str
+    name: str
+    mapper: str
+    reducer: str
+    num_map_tasks: int
+    num_reduce_tasks: int
+    input_rows: int
+    description: str = ""
+    params: dict = field(default_factory=dict)
+    builtin: bool = False
+    created_ms: int = 0
+    updated_ms: int = 0
+
+    def job_spec(self) -> dict:
+        """Return an independent snapshot suitable for filling a submit form.
+
+        A deep copy of ``params`` is returned so callers can tweak the applied
+        job (or mutate it during submission) without touching the stored
+        template.
+        """
+        return {
+            "name": self.name,
+            "description": self.description,
+            "mapper": self.mapper,
+            "reducer": self.reducer,
+            "num_map_tasks": self.num_map_tasks,
+            "num_reduce_tasks": self.num_reduce_tasks,
+            "input_rows": self.input_rows,
+            "params": dict(self.params),
+        }
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "JobTemplate":
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+
+# ---------------------------------------------------------------------------
 # Fault / retry event
 # ---------------------------------------------------------------------------
 @dataclass
@@ -267,4 +312,25 @@ def new_worker(worker_id: str, name: str, host: str, port: int, cpu_cores: int,
         registered_ms=now_ms(),
         last_heartbeat_ms=now_ms(),
         exec_mode=exec_mode,
+    )
+
+
+def new_job_template(name: str, mapper: str, reducer: str, num_map_tasks: int,
+                     num_reduce_tasks: int, input_rows: int,
+                     description: str = "", params: Optional[dict] = None,
+                     builtin: bool = False) -> JobTemplate:
+    ts = now_ms()
+    return JobTemplate(
+        template_id=new_id("tpl"),
+        name=name,
+        mapper=mapper,
+        reducer=reducer,
+        num_map_tasks=num_map_tasks,
+        num_reduce_tasks=num_reduce_tasks,
+        input_rows=input_rows,
+        description=description,
+        params=dict(params or {}),
+        builtin=builtin,
+        created_ms=ts,
+        updated_ms=ts,
     )
